@@ -75,9 +75,13 @@ fn sort_images(
     dhash_weight: f32,
 ) {
     let paths = list_pics(input);
+    let max_digits = paths.len().ilog10() as usize + 1;
+
     let imgs: Vec<_> = paths
         .iter()
-        .map(|p| {
+        .enumerate()
+        .map(|(i, p)| {
+            print!("loading image {i:0>max_digits$} of {}\r", paths.len());
             let img = open_img_with_guessed_fmt(p).unwrap().0;
             img.resize(
                 MAX_WIDTH,
@@ -86,15 +90,16 @@ fn sort_images(
             )
         })
         .collect();
+    println!();
 
-    // calc hashes
+    println!("Calculating hashes...");
     let mut hashes: Vec<_> = imgs
         .iter()
         .zip(&paths)
         .map(|(img, p)| (p, ImgHash::from(img)))
         .collect();
 
-    // sort
+    println!("Sorting images...");
     let mut sorted = vec![hashes.remove(0)];
     while !hashes.is_empty() {
         let last = &sorted.last().unwrap().1;
@@ -116,7 +121,6 @@ fn sort_images(
     let in_place = input == output;
 
     // create output
-    let max_digits = paths.len().ilog10() as usize + 1;
     for (new_i, (old, _)) in sorted.iter().enumerate() {
         let mut old_i = usize::MAX;
 
@@ -156,7 +160,11 @@ fn sort_images(
         }
 
         if old_i != new_i {
-            println!("{old:?} => {new:?}");
+            println!(
+                "{:?} => {:?}",
+                old.file_name().unwrap(),
+                new.file_name().unwrap()
+            );
         }
         fs::rename(old, new).unwrap();
     }
