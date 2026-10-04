@@ -1,4 +1,4 @@
-use std::{cmp::Ordering, io::Write, *};
+use std::{fs, path};
 
 use color_histogram::*;
 use dhash::*;
@@ -9,98 +9,14 @@ mod color_histogram;
 mod dhash;
 
 const DIR_INPUT: &str = "input";
-const DIR_OUTPUT: &str = "output";
 const MAX_WIDTH: u32 = 256;
 const MAX_HEIGHT: u32 = 256;
-const OUTPUT_WIDTH: u32 = 32;
-const OUTPUT_HEIGHT: u32 = 32;
 
 fn list_pics(folder: &str) -> Vec<path::PathBuf> {
     fs::read_dir(folder)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()).filter(|p| p.is_file()))
         .collect()
-}
-
-/// Natural compare - splits strings into text/number chunks
-fn natural_cmp(a: &str, b: &str) -> Ordering {
-    let mut a_chars = a.chars().peekable();
-    let mut b_chars = b.chars().peekable();
-
-    loop {
-        match (a_chars.peek(), b_chars.peek()) {
-            (None, None) => return Ordering::Equal,
-            (None, Some(_)) => return Ordering::Less,
-            (Some(_), None) => return Ordering::Greater,
-            (Some(&ac), Some(&bc)) => {
-                if ac.is_ascii_digit() && bc.is_ascii_digit() {
-                    let a_num: String = a_chars
-                        .by_ref()
-                        .take_while(|c| c.is_ascii_digit())
-                        .collect();
-                    let b_num: String = b_chars
-                        .by_ref()
-                        .take_while(|c| c.is_ascii_digit())
-                        .collect();
-
-                    match a_num.len().cmp(&b_num.len()) {
-                        Ordering::Equal => match a_num.cmp(&b_num) {
-                            Ordering::Equal => continue,
-                            ord => return ord,
-                        },
-                        ord => return ord,
-                    }
-                } else {
-                    let ac_lower = ac.to_ascii_lowercase();
-                    let bc_lower = bc.to_ascii_lowercase();
-                    match ac_lower.cmp(&bc_lower) {
-                        Ordering::Equal => {
-                            a_chars.next();
-                            b_chars.next();
-                        }
-                        ord => return ord,
-                    }
-                }
-            }
-        }
-    }
-}
-
-fn list_pics_natural_sort(folder: &str) -> Vec<path::PathBuf> {
-    let mut pics = list_pics(folder);
-    pics.sort_by(|a, b| {
-        natural_cmp(
-            &a.file_stem().unwrap().to_string_lossy(),
-            &b.file_stem().unwrap().to_string_lossy(),
-        )
-    });
-    pics
-}
-
-fn num_digits(n: usize) -> usize {
-    n.ilog10() as usize + 1
-}
-
-#[allow(unused)]
-fn initial_rename() -> io::Result<()> {
-    let mut log = fs::File::create(
-        path::PathBuf::from(DIR_INPUT)
-            .join("notes")
-            .join("initial_rename.log"),
-    )
-    .unwrap();
-    log.write_all(b"[\n").unwrap();
-    let pics = list_pics_natural_sort(DIR_INPUT);
-    let max_digits = num_digits(pics.len());
-    for (i, p) in pics.into_iter().enumerate() {
-        let new = p
-            .with_file_name(format!("{i:0>max_digits$}"))
-            .with_extension(p.extension().unwrap());
-        writeln!(log, "({p:?}, {new:?}),").unwrap();
-        fs::rename(&p, new).unwrap();
-    }
-    log.write_all(b"\n]").unwrap();
-    Ok(())
 }
 
 struct ImgHash {
@@ -129,25 +45,25 @@ impl From<&DynamicImage> for ImgHash {
 }
 
 fn main() {
-    let pics = list_pics(DIR_INPUT);
-    let imgs_with_fmts: Vec<_> = pics
+    let paths = list_pics(DIR_INPUT);
+
+    let imgs: Vec<_> = paths
         .iter()
         .map(|p| {
-            let (img, fmt) = open_img_with_guessed_fmt(p).unwrap();
-            let img = img.resize(
+            let img = open_img_with_guessed_fmt(p).unwrap().0;
+            img.resize(
                 MAX_WIDTH,
                 MAX_HEIGHT,
                 image::imageops::FilterType::Triangle,
-            );
-            (img, fmt)
+            )
         })
         .collect();
 
     // calc hashes
-    let mut hashes: Vec<_> = imgs_with_fmts
+    let mut hashes: Vec<_> = imgs
         .iter()
-        .enumerate()
-        .map(|(i, (img, _))| (i, ImgHash::from(img)))
+        .zip(&paths)
+        .map(|(img, p)| (p, ImgHash::from(img)))
         .collect();
 
     // sort
@@ -163,22 +79,30 @@ fn main() {
             .unwrap();
         sorted.push(hashes.remove(idx));
     }
-    assert_eq!(pics.len(), sorted.len());
 
     // create output
-    fs::create_dir_all(DIR_OUTPUT).unwrap();
-    let max_digits = num_digits(pics.len());
-    for (new_i, (old_i, _)) in sorted.iter().enumerate() {
-        let old_path = &pics[*old_i];
-        let (img, fmt) = &imgs_with_fmts[*old_i];
-        let ext = old_path.extension().unwrap().to_string_lossy();
-        let new_path = path::PathBuf::from(DIR_OUTPUT)
-            .join(format!("{new_i:0>max_digits$}.{ext}"));
-        let downsampled = img.resize(
-            OUTPUT_WIDTH,
-            OUTPUT_HEIGHT,
-            image::imageops::FilterType::Triangle,
-        );
-        downsampled.save_with_format(&new_path, *fmt).unwrap();
+    let max_digits = paths.len().ilog10() as usize + 1;
+    for (new_i, (old, _)) in sorted.iter().enumerate() {
+        let mut old_gen = u32::MAX;
+        let mut old_i = usize::MAX;
+        if let Some((old_gen_s, old_i_s)) = old
+            .file_stem()
+            .unwrap()
+            .to_str()
+            .and_then(|s| s.split_once('_'))
+        {
+            old_gen = old_gen_s.parse::<u32>().unwrap_or(old_gen);
+            old_i = old_i_s.parse::<usize>().unwrap_or(old_i)
+        }
+        let new_gen = old_gen.wrapping_add(1);
+        let new = old
+            .parent()
+            .unwrap()
+            .join(format!("{new_gen}_{new_i:0>max_digits$}"))
+            .with_extension(old.extension().unwrap_or_default());
+        if old_i == new_i {
+            println!("{old:?} => {new:?}");
+        }
+        fs::rename(old, new).unwrap();
     }
 }
