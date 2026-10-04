@@ -3,7 +3,7 @@ use std::{
     *,
 };
 
-use image::DynamicImage;
+use image::{DynamicImage, GenericImageView, Pixel};
 use picsort::*;
 
 #[derive(Default)]
@@ -34,23 +34,20 @@ impl DerefMut for Histogram {
     }
 }
 
-pub fn map_color_histograms<'a>(
-    imgs: impl IntoIterator<Item = &'a DynamicImage>,
-) -> impl Iterator<Item = Histogram> {
-    imgs.into_iter().map(|img| {
-        let img = img.to_rgb8();
-        let dim = img.dimensions();
-        let pixel_count = dim.0 * dim.1;
+impl From<&DynamicImage> for Histogram {
+    fn from(img: &DynamicImage) -> Self {
         let mut histogram = Histogram::default();
-        for px in img.pixels() {
-            let hsv = rgb_to_hsv(px.0);
+        for (_, _, rgba) in img.pixels() {
+            let hsv = rgb_to_hsv(rgba.to_rgb().0);
             let hue = hsv.hue.into_positive_degrees();
             let idx = map_range_from_0(hue, 360., (Histogram::BINS - 1) as f32)
                 .floor();
             histogram[idx as usize] += 1.;
         }
         // normalize to pixel count
+        let dim = img.dimensions();
+        let pixel_count = dim.0 * dim.1;
         histogram.iter_mut().for_each(|v| *v /= pixel_count as f32);
         histogram
-    })
+    }
 }

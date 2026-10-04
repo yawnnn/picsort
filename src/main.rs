@@ -6,10 +6,11 @@ use picsort::*;
 mod color_histogram;
 
 const DIR_ORIGINAL: &str = "original";
-const DIR_DOWNSAMPLED: &str = "downsampled";
 const DIR_OUT: &str = "out";
-const DOWNSAMPLE_WIDTH: usize = 32;
-const DOWNSAMPLE_HEIGHT: usize = 32;
+const MAX_WIDTH: u32 = 256;
+const MAX_HEIGHT: u32 = 256;
+const OUT_WIDTH: u32 = 32;
+const OUT_HEIGHT: u32 = 32;
 
 fn list_pics(folder: &str) -> Vec<path::PathBuf> {
     fs::read_dir(folder)
@@ -99,42 +100,26 @@ fn initial_rename() -> io::Result<()> {
     Ok(())
 }
 
-#[allow(unused)]
-fn initial_downsample() {
-    if fs::exists(DIR_DOWNSAMPLED).unwrap() {
-        let exit = process::Command::new("rm")
-            .arg("-rf")
-            .arg(DIR_DOWNSAMPLED)
-            .status()
-            .unwrap();
-        assert!(exit.success());
-    }
-    fs::create_dir_all(DIR_DOWNSAMPLED).unwrap();
-    for p in list_pics(DIR_ORIGINAL) {
-        let (img, fmt) = open_img_with_guessed_fmt(&p).unwrap();
-        let img = img.resize_exact(
-            DOWNSAMPLE_WIDTH as u32,
-            DOWNSAMPLE_HEIGHT as u32,
-            image::imageops::FilterType::Triangle,
-        );
-        img.save_with_format(
-            path::PathBuf::from(DIR_DOWNSAMPLED).join(p.file_name().unwrap()),
-            fmt,
-        )
-        .unwrap();
-    }
-}
-
 fn main() {
-    let pics = list_pics(DIR_DOWNSAMPLED);
-    let imgs = pics
+    let pics = list_pics(DIR_ORIGINAL);
+    let imgs_with_fmts: Vec<_> = pics
         .iter()
-        .map(|p| open_img_with_guessed_fmt(p).unwrap())
-        .collect::<Vec<_>>();
-    let mut histograms: Vec<_> =
-        map_color_histograms(imgs.iter().map(|(img, _)| img))
-            .enumerate()
-            .collect();
+        .map(|p| {
+            let (img, fmt) = open_img_with_guessed_fmt(p).unwrap();
+            let img = img.resize(
+                MAX_WIDTH,
+                MAX_HEIGHT,
+                image::imageops::FilterType::Triangle,
+            );
+            (img, fmt)
+        })
+        .collect();
+
+    let mut histograms: Vec<_> = imgs_with_fmts
+        .iter()
+        .enumerate()
+        .map(|(i, (img, _))| (i, Histogram::from(img)))
+        .collect();
 
     // sort histograms
     let mut sorted = vec![histograms.remove(0)];
@@ -156,9 +141,16 @@ fn main() {
     let max_digits = num_digits(pics.len());
     for (new_i, (old_i, _)) in sorted.iter().enumerate() {
         let old_path = &pics[*old_i];
+        let (img, fmt) = &imgs_with_fmts[*old_i];
         let ext = old_path.extension().unwrap().to_string_lossy();
         let new_path = path::PathBuf::from(DIR_OUT)
             .join(format!("{new_i:0>max_digits$}.{ext}"));
-        fs::copy(old_path, &new_path).unwrap();
+        let downsampled = img.resize(
+            OUT_WIDTH,
+            OUT_HEIGHT,
+            image::imageops::FilterType::Triangle,
+        );
+        downsampled.save_with_format(&new_path, *fmt).unwrap();
+        //fs::copy(old_path, &new_path).unwrap();
     }
 }
