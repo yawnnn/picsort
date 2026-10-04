@@ -1,16 +1,19 @@
 use std::{cmp::Ordering, io::Write, *};
 
 use color_histogram::*;
+use dhash::*;
+use image::DynamicImage;
 use picsort::*;
 
 mod color_histogram;
+mod dhash;
 
-const DIR_ORIGINAL: &str = "original";
-const DIR_OUT: &str = "out";
+const DIR_INPUT: &str = "input";
+const DIR_OUTPUT: &str = "output";
 const MAX_WIDTH: u32 = 256;
 const MAX_HEIGHT: u32 = 256;
-const OUT_WIDTH: u32 = 32;
-const OUT_HEIGHT: u32 = 32;
+const OUTPUT_WIDTH: u32 = 32;
+const OUTPUT_HEIGHT: u32 = 32;
 
 fn list_pics(folder: &str) -> Vec<path::PathBuf> {
     fs::read_dir(folder)
@@ -81,13 +84,13 @@ fn num_digits(n: usize) -> usize {
 #[allow(unused)]
 fn initial_rename() -> io::Result<()> {
     let mut log = fs::File::create(
-        path::PathBuf::from(DIR_ORIGINAL)
+        path::PathBuf::from(DIR_INPUT)
             .join("notes")
             .join("initial_rename.log"),
     )
     .unwrap();
     log.write_all(b"[\n").unwrap();
-    let pics = list_pics_natural_sort(DIR_ORIGINAL);
+    let pics = list_pics_natural_sort(DIR_INPUT);
     let max_digits = num_digits(pics.len());
     for (i, p) in pics.into_iter().enumerate() {
         let new = p
@@ -100,8 +103,33 @@ fn initial_rename() -> io::Result<()> {
     Ok(())
 }
 
+struct ImgHash {
+    histogram: Histogram,
+    dhash: DHash,
+}
+
+impl ImgHash {
+    const HISTOGRAM_WEIGHT: f32 = 0.5;
+    const DHASH_WEIGHT: f32 = 0.5;
+
+    fn dist(&self, other: &Self) -> f32 {
+        Self::HISTOGRAM_WEIGHT
+            * self.histogram.dist_normalized(&other.histogram)
+            + Self::DHASH_WEIGHT * self.dhash.dist_normalized(&other.dhash)
+    }
+}
+
+impl From<&DynamicImage> for ImgHash {
+    fn from(img: &image::DynamicImage) -> Self {
+        Self {
+            histogram: Histogram::from(img),
+            dhash: DHash::from(img),
+        }
+    }
+}
+
 fn main() {
-    let pics = list_pics(DIR_ORIGINAL);
+    let pics = list_pics(DIR_INPUT);
     let imgs_with_fmts: Vec<_> = pics
         .iter()
         .map(|p| {
@@ -115,42 +143,42 @@ fn main() {
         })
         .collect();
 
-    let mut histograms: Vec<_> = imgs_with_fmts
+    // calc hashes
+    let mut hashes: Vec<_> = imgs_with_fmts
         .iter()
         .enumerate()
-        .map(|(i, (img, _))| (i, Histogram::from(img)))
+        .map(|(i, (img, _))| (i, ImgHash::from(img)))
         .collect();
 
-    // sort histograms
-    let mut sorted = vec![histograms.remove(0)];
-    while !histograms.is_empty() {
+    // sort
+    let mut sorted = vec![hashes.remove(0)];
+    while !hashes.is_empty() {
         let last = &sorted.last().unwrap().1;
-        let (idx, _) = histograms
+        let (idx, _) = hashes
             .iter()
             .enumerate()
             .min_by(|(_, (_, a)), (_, (_, b))| {
                 last.dist(a).partial_cmp(&last.dist(b)).unwrap()
             })
             .unwrap();
-        sorted.push(histograms.remove(idx));
+        sorted.push(hashes.remove(idx));
     }
     assert_eq!(pics.len(), sorted.len());
 
-    // create reordered result
-    fs::create_dir_all(DIR_OUT).unwrap();
+    // create output
+    fs::create_dir_all(DIR_OUTPUT).unwrap();
     let max_digits = num_digits(pics.len());
     for (new_i, (old_i, _)) in sorted.iter().enumerate() {
         let old_path = &pics[*old_i];
         let (img, fmt) = &imgs_with_fmts[*old_i];
         let ext = old_path.extension().unwrap().to_string_lossy();
-        let new_path = path::PathBuf::from(DIR_OUT)
+        let new_path = path::PathBuf::from(DIR_OUTPUT)
             .join(format!("{new_i:0>max_digits$}.{ext}"));
         let downsampled = img.resize(
-            OUT_WIDTH,
-            OUT_HEIGHT,
+            OUTPUT_WIDTH,
+            OUTPUT_HEIGHT,
             image::imageops::FilterType::Triangle,
         );
         downsampled.save_with_format(&new_path, *fmt).unwrap();
-        //fs::copy(old_path, &new_path).unwrap();
     }
 }

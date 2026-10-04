@@ -12,12 +12,16 @@ pub struct Histogram([f32; Self::BINS]);
 impl Histogram {
     pub const BINS: usize = 32;
 
-    /// chi-squared distance
+    /// Chi-squared distance
     pub fn dist(&self, other: &Self) -> f32 {
         self.iter()
             .zip(other.iter())
             .filter(|(a, b)| *a + *b > 0.)
             .fold(0., |acc, (&a, &b)| acc + (a - b).powi(2) / (a + b))
+    }
+
+    pub fn dist_normalized(&self, other: &Self) -> f32 {
+        self.dist(other) / 2.
     }
 }
 
