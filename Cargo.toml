@@ -1,0 +1,8 @@
+[package]
+name = "picsort"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+image = "0.25.10"
+palette = "0.7.7"
