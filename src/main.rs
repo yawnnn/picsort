@@ -1,18 +1,33 @@
-use std::{fs, path};
+use clap::Parser;
+use image::{DynamicImage, ImageFormat, ImageReader, ImageResult};
+use std::{
+    fs,
+    io::{self, Write},
+    ops::{Div, Mul},
+    path::{Path, PathBuf},
+};
 
 use color_histogram::*;
 use dhash::*;
-use image::DynamicImage;
-use picsort::*;
 
 mod color_histogram;
 mod dhash;
 
-const DIR_INPUT: &str = "input";
+// some extensions (eg. `riff`) will error out, even though the format can be guessed by the contents
+pub fn open_img_with_guessed_fmt(
+    p: &Path,
+) -> ImageResult<(DynamicImage, ImageFormat)> {
+    let reader = ImageReader::new(io::BufReader::new(fs::File::open(p)?))
+        .with_guessed_format()?;
+    let fmt = reader.format().unwrap();
+    let img = reader.decode()?;
+    Ok((img, fmt))
+}
+
 const MAX_WIDTH: u32 = 256;
 const MAX_HEIGHT: u32 = 256;
 
-fn list_pics(folder: &str) -> Vec<path::PathBuf> {
+pub fn list_pics(folder: &Path) -> Vec<PathBuf> {
     fs::read_dir(folder)
         .unwrap()
         .filter_map(|e| e.ok().map(|e| e.path()).filter(|p| p.is_file()))
@@ -25,13 +40,14 @@ struct ImgHash {
 }
 
 impl ImgHash {
-    const HISTOGRAM_WEIGHT: f32 = 0.5;
-    const DHASH_WEIGHT: f32 = 0.5;
-
-    fn dist(&self, other: &Self) -> f32 {
-        Self::HISTOGRAM_WEIGHT
-            * self.histogram.dist_normalized(&other.histogram)
-            + Self::DHASH_WEIGHT * self.dhash.dist_normalized(&other.dhash)
+    fn dist(
+        &self,
+        other: &Self,
+        histogram_weight: f32,
+        dhash_weight: f32,
+    ) -> f32 {
+        histogram_weight * self.histogram.dist_normalized(&other.histogram)
+            + dhash_weight * self.dhash.dist_normalized(&other.dhash)
     }
 }
 
@@ -44,9 +60,21 @@ impl From<&DynamicImage> for ImgHash {
     }
 }
 
-fn main() {
-    let paths = list_pics(DIR_INPUT);
+fn prompt(msg: &str) -> String {
+    print!("{}", msg);
+    io::stdout().flush().unwrap();
+    let mut s = String::new();
+    io::stdin().read_line(&mut s).unwrap();
+    s
+}
 
+fn sort_images(
+    input: &Path,
+    output: &Path,
+    histogram_weight: f32,
+    dhash_weight: f32,
+) {
+    let paths = list_pics(input);
     let imgs: Vec<_> = paths
         .iter()
         .map(|p| {
@@ -74,35 +102,83 @@ fn main() {
             .iter()
             .enumerate()
             .min_by(|(_, (_, a)), (_, (_, b))| {
-                last.dist(a).partial_cmp(&last.dist(b)).unwrap()
+                last.dist(a, histogram_weight, dhash_weight)
+                    .partial_cmp(&last.dist(b, histogram_weight, dhash_weight))
+                    .unwrap()
             })
             .unwrap();
         sorted.push(hashes.remove(idx));
     }
 
+    if !fs::exists(output).unwrap() {
+        fs::create_dir_all(output).unwrap();
+    }
+    let in_place = input == output;
+
     // create output
     let max_digits = paths.len().ilog10() as usize + 1;
     for (new_i, (old, _)) in sorted.iter().enumerate() {
-        let mut old_gen = u32::MAX;
         let mut old_i = usize::MAX;
-        if let Some((old_gen_s, old_i_s)) = old
-            .file_stem()
-            .unwrap()
-            .to_str()
-            .and_then(|s| s.split_once('_'))
-        {
-            old_gen = old_gen_s.parse::<u32>().unwrap_or(old_gen);
-            old_i = old_i_s.parse::<usize>().unwrap_or(old_i)
+
+        let new = if in_place {
+            // prefix with generation-id in case of multiple retries
+            let mut old_gen = u32::MAX;
+            if let Some((old_gen_s, old_i_s)) = old
+                .file_stem()
+                .unwrap()
+                .to_str()
+                .and_then(|s| s.split_once('_'))
+            {
+                old_gen = old_gen_s.parse::<u32>().unwrap_or(old_gen);
+                old_i = old_i_s.parse::<usize>().unwrap_or(old_i)
+            }
+            let new_gen = old_gen.wrapping_add(1);
+            output
+                .join(format!("{new_gen}_{new_i:0>max_digits$}"))
+                .with_extension(old.extension().unwrap_or_default())
+        } else {
+            output
+                .join(format!("{new_i:0>max_digits$}"))
+                .with_extension(old.extension().unwrap_or_default())
+        };
+
+        if fs::exists(&new).unwrap() {
+            if in_place {
+                println!("skipping {old:?} => {new:?} (already exists)");
+                continue;
+            } else {
+                let s =
+                    prompt(&format!("{new:?} already exists. Overwrite? y/N "));
+                if s.trim().to_lowercase() != "y" {
+                    continue;
+                }
+            }
         }
-        let new_gen = old_gen.wrapping_add(1);
-        let new = old
-            .parent()
-            .unwrap()
-            .join(format!("{new_gen}_{new_i:0>max_digits$}"))
-            .with_extension(old.extension().unwrap_or_default());
-        if old_i == new_i {
+
+        if old_i != new_i {
             println!("{old:?} => {new:?}");
         }
         fs::rename(old, new).unwrap();
     }
+}
+
+#[derive(Parser)]
+struct CliArgs {
+    input: PathBuf,
+    output: Option<PathBuf>,
+    #[arg(long, default_value = "0.5")]
+    histogram_weight: f32,
+    #[arg(long, default_value = "0.5")]
+    dhash_weight: f32,
+}
+
+fn main() {
+    let args = CliArgs::parse();
+    let output = args.output.as_ref().unwrap_or(&args.input);
+    sort_images(
+        &args.input,
+        output,
+        args.histogram_weight,
+        args.dhash_weight,
+    );
 }

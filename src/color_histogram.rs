@@ -4,7 +4,20 @@ use std::{
 };
 
 use image::{DynamicImage, GenericImageView, Pixel};
-use picsort::*;
+use palette::{Hsv, IntoColor, Srgb};
+use crate::*;
+
+pub fn rgb_to_hsv(rgb: [u8; 3]) -> Hsv {
+    Srgb::from(rgb).into_format::<f32>().into_color()
+}
+
+pub fn map_range_from_0<T: Mul<Output = T> + Div<Output = T>>(
+    n: T,
+    src_end: T,
+    dst_end: T,
+) -> T {
+    (n / src_end) * dst_end
+}
 
 #[derive(Default)]
 pub struct Histogram([f32; Self::BINS]);
