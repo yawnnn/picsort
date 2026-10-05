@@ -68,36 +68,25 @@ fn prompt(msg: &str) -> String {
     s
 }
 
-fn sort_images(
-    input: &Path,
-    output: &Path,
-    histogram_weight: f32,
-    dhash_weight: f32,
-) {
-    let paths = list_pics(input);
+fn sort_images(args: &CliArgs, output: &Path) {
+    let paths = list_pics(&args.input);
     let max_digits = paths.len().ilog10() as usize + 1;
 
-    let imgs: Vec<_> = paths
+    let mut hashes: Vec<_> = paths
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            print!("loading image {i:0>max_digits$} of {}\r", paths.len());
+            print!("Processing image {i:0>max_digits$} of {}\r", paths.len());
             let img = open_img_with_guessed_fmt(p).unwrap().0;
-            img.resize(
+            let img = img.resize(
                 MAX_WIDTH,
                 MAX_HEIGHT,
                 image::imageops::FilterType::Triangle,
-            )
+            );
+            (p, ImgHash::from(&img))
         })
         .collect();
     println!();
-
-    println!("Calculating hashes...");
-    let mut hashes: Vec<_> = imgs
-        .iter()
-        .zip(&paths)
-        .map(|(img, p)| (p, ImgHash::from(img)))
-        .collect();
 
     println!("Sorting images...");
     let mut sorted = vec![hashes.remove(0)];
@@ -107,8 +96,12 @@ fn sort_images(
             .iter()
             .enumerate()
             .min_by(|(_, (_, a)), (_, (_, b))| {
-                last.dist(a, histogram_weight, dhash_weight)
-                    .partial_cmp(&last.dist(b, histogram_weight, dhash_weight))
+                last.dist(a, args.histogram_weight, args.dhash_weight)
+                    .partial_cmp(&last.dist(
+                        b,
+                        args.histogram_weight,
+                        args.dhash_weight,
+                    ))
                     .unwrap()
             })
             .unwrap();
@@ -118,14 +111,14 @@ fn sort_images(
     if !fs::exists(output).unwrap() {
         fs::create_dir_all(output).unwrap();
     }
-    let in_place = input == output;
+    let in_place = args.input == output;
 
     // create output
     for (new_i, (old, _)) in sorted.iter().enumerate() {
         let mut old_i = usize::MAX;
 
         let new = if in_place {
-            // prefix with generation-id in case of multiple retries
+            // prefix with generation-ID in case of multiple retries
             let mut old_gen = u32::MAX;
             if let Some((old_gen_s, old_i_s)) = old
                 .file_stem()
@@ -159,34 +152,41 @@ fn sort_images(
             }
         }
 
-        if old_i != new_i {
+        if !args.quiet && old_i != new_i {
             println!(
                 "{:?} => {:?}",
                 old.file_name().unwrap(),
                 new.file_name().unwrap()
             );
         }
-        fs::rename(old, new).unwrap();
+        if !args.test {
+            fs::rename(old, new).unwrap();
+        }
     }
 }
 
 #[derive(Parser)]
 struct CliArgs {
+    /// Input directory
     input: PathBuf,
+    /// Output directory
     output: Option<PathBuf>,
     #[arg(long, default_value = "0.5")]
+    /// Weight of the color histogram - how much color-similarity matters
     histogram_weight: f32,
+    /// Weight of the dhash - how much shape-similarity matters
     #[arg(long, default_value = "0.5")]
     dhash_weight: f32,
+    /// Quiet mode - don't print renames
+    #[arg(long)]
+    quiet: bool,
+    /// Test mode - don't apply changes
+    #[arg(short, long)]
+    test: bool,
 }
 
 fn main() {
     let args = CliArgs::parse();
     let output = args.output.as_ref().unwrap_or(&args.input);
-    sort_images(
-        &args.input,
-        output,
-        args.histogram_weight,
-        args.dhash_weight,
-    );
+    sort_images(&args, output);
 }
