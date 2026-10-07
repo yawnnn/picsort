@@ -3,9 +3,9 @@ use std::{
     *,
 };
 
+use crate::*;
 use image::{DynamicImage, GenericImageView, Pixel};
 use palette::{Hsv, IntoColor, Srgb};
-use crate::*;
 
 pub fn rgb_to_hsv(rgb: [u8; 3]) -> Hsv {
     Srgb::from(rgb).into_format::<f32>().into_color()

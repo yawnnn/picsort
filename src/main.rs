@@ -24,9 +24,6 @@ pub fn open_img_with_guessed_fmt(
     Ok((img, fmt))
 }
 
-const MAX_WIDTH: u32 = 256;
-const MAX_HEIGHT: u32 = 256;
-
 pub fn list_pics(folder: &Path) -> Vec<PathBuf> {
     fs::read_dir(folder)
         .unwrap()
@@ -49,13 +46,36 @@ impl ImgHash {
         histogram_weight * self.histogram.dist_normalized(&other.histogram)
             + dhash_weight * self.dhash.dist_normalized(&other.dhash)
     }
+
+    /// compare `self`'s with `other`'s similarity to reference
+    fn cmp_to_reference(
+        &self,
+        other: &Self,
+        reference: &Self,
+        histogram_weight: f32,
+        dhash_weight: f32,
+    ) -> std::cmp::Ordering {
+        reference
+            .dist(self, histogram_weight, dhash_weight)
+            .partial_cmp(&reference.dist(other, histogram_weight, dhash_weight))
+            .unwrap()
+    }
 }
 
-impl From<&DynamicImage> for ImgHash {
-    fn from(img: &image::DynamicImage) -> Self {
+impl From<DynamicImage> for ImgHash {
+    fn from(img: image::DynamicImage) -> Self {
+        const MAX_WIDTH: u32 = 256;
+        const MAX_HEIGHT: u32 = 256;
+        // shrinking twice from full size is needlessly expensive, and we're never gonna need full size
+        // so histogram doesn't resize at all, and dhash resizes from this
+        let img = img.resize(
+            MAX_WIDTH,
+            MAX_HEIGHT,
+            image::imageops::FilterType::Triangle,
+        );
         Self {
-            histogram: Histogram::from(img),
-            dhash: DHash::from(img),
+            histogram: Histogram::from(&img),
+            dhash: DHash::from(&img),
         }
     }
 }
@@ -68,76 +88,120 @@ fn prompt(msg: &str) -> String {
     s
 }
 
-fn sort_images(args: &CliArgs, output: &Path) {
-    let paths = list_pics(&args.input);
-    let max_digits = paths.len().ilog10() as usize + 1;
+fn load_hash(p: &Path) -> ImgHash {
+    let img = open_img_with_guessed_fmt(p).unwrap().0;
+    ImgHash::from(img)
+}
 
-    let mut hashes: Vec<_> = paths
+#[derive(Clone, Copy)]
+struct GenName {
+    generation: u32,
+    idx: usize,
+}
+
+impl GenName {
+    fn next_gen(self, idx: usize) -> Self {
+        Self {
+            generation: self.generation.wrapping_add(1),
+            idx,
+        }
+    }
+
+    fn as_filename(self, max_digits: usize) -> String {
+        format!("{}_{:0>max_digits$}", self.generation, self.idx)
+    }
+}
+
+impl TryFrom<&Path> for GenName {
+    type Error = ();
+    fn try_from(p: &Path) -> Result<Self, Self::Error> {
+        p.file_stem()
+            .unwrap()
+            .to_str()
+            .and_then(|s| s.split_once('_'))
+            .and_then(|(gen_s, idx_s)| {
+                gen_s
+                    .parse::<u32>()
+                    .and_then(|generation| {
+                        idx_s
+                            .parse::<usize>()
+                            .map(|idx| Self { generation, idx })
+                    })
+                    .ok()
+            })
+            .ok_or(())
+    }
+}
+
+fn sort_pictures(
+    inputs: &[PathBuf],
+    output_dir: &Path,
+    reference: &Path,
+    args: &CliArgs,
+) {
+    let max_digits = inputs.len().ilog10() as usize + 1;
+    let mut hashes: Vec<_> = inputs
         .iter()
         .enumerate()
         .map(|(i, p)| {
-            print!("Processing image {i:0>max_digits$} of {}\r", paths.len());
-            let img = open_img_with_guessed_fmt(p).unwrap().0;
-            let img = img.resize(
-                MAX_WIDTH,
-                MAX_HEIGHT,
-                image::imageops::FilterType::Triangle,
-            );
-            (p, ImgHash::from(&img))
+            print!("Processing image {i:0>max_digits$} of {}\r", inputs.len());
+            let hash = load_hash(p);
+            (p.as_path(), hash)
         })
         .collect();
     println!();
 
+    let norm_reference =
+        reference.canonicalize().unwrap_or(reference.to_owned());
+
+    let (elem0, remove0) = if let Some(pos) = inputs.iter().position(|p| {
+        p.canonicalize().as_deref().unwrap_or(p) == norm_reference
+    }) {
+        (hashes.remove(pos), false)
+    } else {
+        let hash = load_hash(&norm_reference);
+        ((&*norm_reference, hash), true)
+    };
+
     println!("Sorting images...");
-    let mut sorted = vec![hashes.remove(0)];
+    let mut sorted = vec![elem0];
     while !hashes.is_empty() {
         let last = &sorted.last().unwrap().1;
         let (idx, _) = hashes
             .iter()
             .enumerate()
             .min_by(|(_, (_, a)), (_, (_, b))| {
-                last.dist(a, args.histogram_weight, args.dhash_weight)
-                    .partial_cmp(&last.dist(
-                        b,
-                        args.histogram_weight,
-                        args.dhash_weight,
-                    ))
-                    .unwrap()
+                a.cmp_to_reference(
+                    b,
+                    last,
+                    args.histogram_weight,
+                    args.dhash_weight,
+                )
             })
             .unwrap();
         sorted.push(hashes.remove(idx));
     }
 
-    if !fs::exists(output).unwrap() {
-        fs::create_dir_all(output).unwrap();
+    if remove0 {
+        sorted.remove(0);
     }
-    let in_place = args.input == output;
+
+    if !fs::exists(output_dir).unwrap() {
+        fs::create_dir_all(output_dir).unwrap();
+    }
+    let in_place = args.input == output_dir;
 
     // create output
-    for (new_i, (old, _)) in sorted.iter().enumerate() {
-        let mut old_i = usize::MAX;
-
-        let new = if in_place {
-            // prefix with generation-ID in case of multiple retries
-            let mut old_gen = u32::MAX;
-            if let Some((old_gen_s, old_i_s)) = old
-                .file_stem()
-                .unwrap()
-                .to_str()
-                .and_then(|s| s.split_once('_'))
-            {
-                old_gen = old_gen_s.parse::<u32>().unwrap_or(old_gen);
-                old_i = old_i_s.parse::<usize>().unwrap_or(old_i)
-            }
-            let new_gen = old_gen.wrapping_add(1);
-            output
-                .join(format!("{new_gen}_{new_i:0>max_digits$}"))
-                .with_extension(old.extension().unwrap_or_default())
+    for (new_idx, (old, _)) in sorted.into_iter().enumerate() {
+        let ext = old.extension().unwrap_or_default();
+        let old_gen = GenName::try_from(old);
+        let new_name = if let Ok(old_gen) = old_gen {
+            let new_gen = old_gen.next_gen(new_idx);
+            new_gen.as_filename(max_digits)
         } else {
-            output
-                .join(format!("{new_i:0>max_digits$}"))
-                .with_extension(old.extension().unwrap_or_default())
+            format!("{new_idx:0>max_digits$}")
         };
+        let new = output_dir.join(new_name).with_extension(ext);
 
         if fs::exists(&new).unwrap() {
             if in_place {
@@ -152,13 +216,16 @@ fn sort_images(args: &CliArgs, output: &Path) {
             }
         }
 
-        if !args.quiet && old_i != new_i {
+        if !args.quiet
+            && (old_gen.is_err() || old_gen.is_ok_and(|g| g.idx != new_idx))
+        {
             println!(
                 "{:?} => {:?}",
                 old.file_name().unwrap(),
                 new.file_name().unwrap()
             );
         }
+
         if !args.test {
             fs::rename(old, new).unwrap();
         }
@@ -169,17 +236,27 @@ fn sort_images(args: &CliArgs, output: &Path) {
 struct CliArgs {
     /// Input directory
     input: PathBuf,
+
     /// Output directory
     output: Option<PathBuf>,
-    #[arg(long, default_value = "0.5")]
+
+    /// Reference image to start the comparison chain from.
+    /// Defaults to a random one, making the result slightly different each time.
+    #[arg(long)]
+    reference: Option<PathBuf>,
+
     /// Weight of the color histogram - how much color-similarity matters
+    #[arg(long, default_value = "0.5")]
     histogram_weight: f32,
+
     /// Weight of the dhash - how much shape-similarity matters
     #[arg(long, default_value = "0.5")]
     dhash_weight: f32,
+
     /// Quiet mode - don't print renames
     #[arg(long)]
     quiet: bool,
+
     /// Test mode - don't apply changes
     #[arg(short, long)]
     test: bool,
@@ -187,6 +264,12 @@ struct CliArgs {
 
 fn main() {
     let args = CliArgs::parse();
-    let output = args.output.as_ref().unwrap_or(&args.input);
-    sort_images(&args, output);
+    let output_dir = args.output.as_ref().unwrap_or(&args.input);
+    let inputs = list_pics(&args.input);
+    if let Some(first) = inputs.first() {
+        let reference = args.reference.as_ref().unwrap_or(first);
+        sort_pictures(&inputs, output_dir, reference, &args);
+    } else {
+        println!("No images found in {:?}", args.input);
+    }
 }
